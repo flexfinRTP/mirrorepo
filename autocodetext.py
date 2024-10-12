@@ -186,7 +186,7 @@ class App(tk.Tk):
         self.bind_shortcuts()
         self.file_items = {}
         try:
-            self.iconbitmap('path_to_icon.ico')
+            self.iconbitmap('logo.ico')
         except tk.TclError:
             print("Icon file not found. Using default icon.")
 
@@ -532,13 +532,13 @@ For more information, please visit our website or contact support.
         about_text = """
 Mirrorepo v1.0
 
-Developed by: Your Name/Company
-Copyright © 2023
+Developed by: Justin Gaffney
+Copyright © 2024
 
-This application helps you consolidate multiple code files into a single text file for easy review and analysis.
+This application helps you consolidate multiple code files into a single text file for easy A.I. review and analysis.
 
 For more information, visit our website:
-https://www.example.com/mirrorepo
+https://github.com/flexfinRTP/mirrorepo
         """
         messagebox.showinfo("About Mirrorepo", about_text)
 

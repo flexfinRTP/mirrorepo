@@ -1,8 +1,10 @@
 # Mirrorepo
 
+## Download our Installer or use the Portable application on any Windows Machine
+
 ## Overview
 
-Mirrorepo is a tool designed for efficient code file consolidation with real-time updates and monitoring. Mirrorepo is ideal for developers who need to maintain a consolidated view of their codebase to prepare code for AI-assisted review. 
+Mirrorepo is a tool designed for efficient code file consolidation with real-time updates and monitoring. Mirrorepo is ideal for developers who need to maintain a consolidated view of their codebase to prepare code for AI-assisted review.
 
 ## How To Use
 To convert code files to a single text file:
@@ -105,3 +107,6 @@ Contributions to Mirrorepo are welcome! Here's how you can help:
 This project is licensed under the MIT License.
 
 For more information or to report issues, please visit our [GitHub repository](https://github.com/flexfinRTP/mirrorepo).
+
+## Mirrorepo
+![Main GUI Screenshot](logo.ico)
