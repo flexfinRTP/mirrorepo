@@ -1,10 +1,10 @@
-# Improved Code File Manager v4
+# Mirrorepo
 
 ## Overview
 
-The Improved Code File Manager v4 is a Python-based tool designed for efficient code file consolidation and real-time monitoring. It provides a GUI interface built with Tkinter and leverages the watchdog library for file system event handling.
+The Mirrorepo is a Python-based tool designed for efficient code file consolidation and real-time monitoring. It provides a GUI interface built with Tkinter and leverages the watchdog library for file system event handling.
 
-![Main GUI Screenshot](placeholder_for_main_gui_screenshot.png)
+![Main GUI Screenshot](autocodetext.png)
 
 ## Key Features
 
@@ -27,7 +27,7 @@ The Improved Code File Manager v4 is a Python-based tool designed for efficient 
 
 1. Clone the repository:
    ```
-   git clone https://github.com/yourusername/improved-code-file-manager.git
+   git clone https://github.com/flexfinRTP/mirrorepo.git
    ```
 
 2. Install dependencies:
@@ -41,13 +41,13 @@ The Improved Code File Manager v4 is a Python-based tool designed for efficient 
 
 Launch the application:
 ```
-python code_file_manager_v4.py
+python autocodetext.py
 ```
 
 ### CLI Mode
 
 ```
-python code_file_manager_v4.py --folder /path/to/code --output output.txt --extensions py js --ignore *.log temp/* --compress
+python autocodetext.py --folder /path/to/code --output output.txt --extensions py js --ignore *.log temp/* --compress
 ```
 
 Run with `--help` for full CLI options.
@@ -67,7 +67,7 @@ Use `config.json` for default settings:
 ```json
 {
   "default_folder": "/path/to/default/folder",
-  "default_output": "consolidated_code.txt",
+  "default_output": "default_repo.txt",
   "default_extensions": [".py", ".js", ".html"],
   "default_ignore_patterns": ["*.log", "temp/*"],
   "default_separator": "###",
@@ -126,17 +126,6 @@ class App(tk.Tk):
 4. Push to the branch
 5. Open a Pull Request
 
-See [CONTRIBUTING.md](placeholder_for_contributing_link) for detailed guidelines.
-
 ## License
 
-This project is licensed under the MIT License. See [LICENSE.md](placeholder_for_license_link) for details.
-
-## Future Development
-
-- Integration with version control systems
-- Plugin system for extended functionality
-- Cloud storage integration
-- AI-powered code analysis
-
-For more information or to report issues, please visit our [GitHub repository](https://github.com/yourusername/improved-code-file-manager).
+This project is licensed under the MIT License.
