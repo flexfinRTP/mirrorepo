@@ -21,14 +21,15 @@ import chardet
 
 # Default ignore patterns for common build and configuration folders
 DEFAULT_IGNORE_PATTERNS = [
-    "node_modules", ".*", "build", "dist", "out", "target", "bin", "obj",
-    "__pycache__", "venv", "env", ".git", ".svn", ".hg", ".vscode", ".idea"
+    "**/node_modules/**", ".*", "**/build/**", "**/dist/**", "**/out/**", "**/target/**", "**/bin/**", "**/obj/**",
+    "**/__pycache__/**", "**/venv/**", "**/env/**", "**/.git/**", "**/.svn/**", "**/.hg/**", "**/.vscode/**", "**/.idea/**"
 ]
 
 # Popular file extensions for top programming languages
 POPULAR_EXTENSIONS = [
     ".py", ".js", ".ts", ".jsx", ".tsx", ".java", ".c", ".cpp", ".cs", ".go",
-    ".rb", ".php", ".swift", ".kt", ".rs", ".scala", ".m", ".h", ".sql", ".sh"
+    ".rb", ".php", ".swift", ".kt", ".rs", ".scala", ".m", ".h", ".sql", ".sh",
+    ".png", ".jpg", ".jpeg"  # Added image formats
 ]
 
 class CodeFileManager:
@@ -42,40 +43,47 @@ class CodeFileManager:
         self.observer = None
         self.is_watching = False
         self.files_to_process = []
+        self.cancel_flag = False
 
     async def read_file(self, file_path):
         try:
             async with aiofiles.open(file_path, 'rb') as file:
                 raw_content = await file.read()
             encoding = chardet.detect(raw_content)['encoding']
-            return raw_content.decode(encoding)
+            return raw_content.decode(encoding or 'utf-8')
         except Exception as e:
             logging.error(f"Unable to read file: {file_path}. Error: {str(e)}")
             return f"[Unable to read file: {file_path}]"
 
     async def write_output(self, content):
-        if self.compress:
-            async with aiofiles.open(self.output_file + '.gz', 'wt', encoding='utf-8') as f:
-                await f.write(gzip.compress(content.encode('utf-8')))
-        else:
-            async with aiofiles.open(self.output_file, 'w', encoding='utf-8') as f:
-                await f.write(content)
+        try:
+            if self.compress:
+                with gzip.open(self.output_file + '.gz', 'wt', encoding='utf-8') as f:
+                    f.write(content)
+            else:
+                async with aiofiles.open(self.output_file, 'w', encoding='utf-8') as f:
+                    await f.write(content)
+        except Exception as e:
+            logging.error(f"Error writing output: {str(e)}")
+            raise
 
     def get_file_metadata(self, file_path):
         stat = os.stat(file_path)
         return f"Last modified: {datetime.fromtimestamp(stat.st_mtime)}, Size: {stat.st_size} bytes"
 
+    def should_ignore(self, path):
+        return any(fnmatch.fnmatch(str(path), pattern) for pattern in self.ignore_patterns)
+
     def list_files(self):
         self.files_to_process = []
         for root, dirs, files in os.walk(self.folder_path):
-            # Apply ignore patterns to directories
-            dirs[:] = [d for d in dirs if not any(fnmatch.fnmatch(d, pat) for pat in self.ignore_patterns)]
+            dirs[:] = [d for d in dirs if not self.should_ignore(Path(root) / d)]
             
             for file in files:
                 file_path = Path(root) / file
                 relative_path = file_path.relative_to(self.folder_path)
                 
-                if any(fnmatch.fnmatch(str(relative_path), pat) for pat in self.ignore_patterns):
+                if self.should_ignore(relative_path):
                     continue
                 
                 if self.extensions and not any(file.endswith(ext) for ext in self.extensions):
@@ -89,10 +97,8 @@ class CodeFileManager:
         file_content = await self.read_file(file_path)
         metadata = self.get_file_metadata(file_path)
         return (f"{self.custom_separator} File: {relative_path} {self.custom_separator}\n"
-                f"# Location: {file_path}\n"
-                f"# {metadata}\n\n"
-                f"{file_content}\n\n"
-                f"{self.custom_separator} End of file {self.custom_separator}\n\n")
+                f"# {metadata}\n"
+                f"{file_content}\n")
 
     async def process_folder(self):
         content = []
@@ -100,41 +106,40 @@ class CodeFileManager:
         processed_files = 0
 
         for file_path in self.files_to_process:
-            result = await self.process_file(file_path)
-            content.append(result)
-            processed_files += 1
-            yield f"Processed: {file_path.relative_to(self.folder_path)}", processed_files / total_files
+            if self.cancel_flag:
+                break
+            try:
+                result = await self.process_file(file_path)
+                content.append(result)
+                processed_files += 1
+                yield f"Processed: {file_path.relative_to(self.folder_path)}", processed_files / total_files
+            except Exception as e:
+                logging.error(f"Error processing file {file_path}: {str(e)}")
+                yield f"Error: {file_path.relative_to(self.folder_path)}", processed_files / total_files
 
-        await self.write_output("".join(content))
-        logging.info(f"Code files from {self.folder_path} have been consolidated into {self.output_file}")
+        if not self.cancel_flag:
+            await self.write_output("".join(content))
+            logging.info(f"Code files from {self.folder_path} have been consolidated into {self.output_file}")
 
     async def update_output_file(self, changed_file):
         async with aiofiles.open(self.output_file, 'r', encoding='utf-8') as f:
             content = await f.read()
 
         relative_path = changed_file.relative_to(self.folder_path)
-        new_content = await self.read_file(changed_file)
-        metadata = self.get_file_metadata(changed_file)
+        new_content = await self.process_file(changed_file)
         
         file_header = f"{self.custom_separator} File: {relative_path} {self.custom_separator}\n"
-        file_footer = f"\n\n{self.custom_separator} End of file {self.custom_separator}\n\n"
-        
         start = content.find(file_header)
         if start != -1:
-            end = content.find(file_footer, start) + len(file_footer)
-            old_content = content[start:end]
-            new_section = (f"{file_header}# Location: {changed_file}\n# {metadata}\n\n{new_content}{file_footer}")
-            
-            diff = list(difflib.unified_diff(old_content.splitlines(), new_section.splitlines(), lineterm=''))
-            if diff:
-                content = content[:start] + new_section + content[end:]
-                await self.write_output(content)
-                logging.info(f"Updated {self.output_file} with changes from {relative_path}")
+            end = content.find(self.custom_separator, start + len(file_header))
+            if end == -1:
+                end = len(content)
+            content = content[:start] + new_content + content[end:]
         else:
-            new_section = (f"{file_header}# Location: {changed_file}\n# {metadata}\n\n{new_content}{file_footer}")
-            content += new_section
-            await self.write_output(content)
-            logging.info(f"Added new file {relative_path} to {self.output_file}")
+            content += new_content
+
+        await self.write_output(content)
+        logging.info(f"Updated {self.output_file} with changes from {relative_path}")
 
     def start_watching(self):
         if not self.is_watching:
@@ -143,7 +148,7 @@ class CodeFileManager:
             event_handler = CodeChangeHandler(self)
             self.observer.schedule(event_handler, self.folder_path, recursive=True)
             self.observer.start()
-            logging.info("Started watching for changes.")
+            logging.info(f"Started watching for changes in {self.folder_path}")
 
     def stop_watching(self):
         if self.is_watching:
@@ -161,7 +166,7 @@ class CodeChangeHandler(FileSystemEventHandler):
             file_path = Path(event.src_path)
             relative_path = file_path.relative_to(self.manager.folder_path)
 
-            if any(fnmatch.fnmatch(str(relative_path), pattern) for pattern in self.manager.ignore_patterns):
+            if self.manager.should_ignore(relative_path):
                 return
 
             logging.info(f"File changed: {relative_path}")
@@ -171,7 +176,7 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Mirrorepo")
-        self.geometry("700x650")
+        self.geometry("800x700")
         self.manager = CodeFileManager()
         self.is_dark_mode = False
         self.log_area = None
@@ -179,8 +184,9 @@ class App(tk.Tk):
         self.create_widgets()
         self.create_menu()
         self.bind_shortcuts()
+        self.file_items = {}
         try:
-            self.iconbitmap('/autoCodeText/logo.ico')
+            self.iconbitmap('path_to_icon.ico')
         except tk.TclError:
             print("Icon file not found. Using default icon.")
 
@@ -197,40 +203,40 @@ class App(tk.Tk):
         self.folder_path_entry = ttk.Entry(main_frame, width=50)
         self.folder_path_entry.grid(row=0, column=1, sticky=(tk.W, tk.E), pady=5)
         ttk.Button(main_frame, text="Browse", command=self.browse_folder).grid(row=0, column=2, padx=5, pady=5)
-        self.create_tooltip(self.folder_path_entry, "Select the folder containing your source code files")
+        self.create_tooltip(self.folder_path_entry, "Select the root folder containing your source code files. All subdirectories will be included.")
 
         # Output File
         ttk.Label(main_frame, text="Output File:").grid(row=1, column=0, sticky=tk.W, pady=5)
         self.output_file_entry = ttk.Entry(main_frame, width=50)
         self.output_file_entry.grid(row=1, column=1, sticky=(tk.W, tk.E), pady=5)
         ttk.Button(main_frame, text="Browse", command=self.browse_output).grid(row=1, column=2, padx=5, pady=5)
-        self.create_tooltip(self.output_file_entry, "Choose where to save the consolidated text file")
+        self.create_tooltip(self.output_file_entry, "Choose the location and name for the consolidated text file. Use .txt extension for uncompressed, or .gz for compressed output.")
 
         # Extensions
         ttk.Label(main_frame, text="File Extensions:").grid(row=2, column=0, sticky=tk.W, pady=5)
         self.extensions_entry = ttk.Entry(main_frame, width=50)
         self.extensions_entry.grid(row=2, column=1, sticky=(tk.W, tk.E), pady=5)
-        self.create_tooltip(self.extensions_entry, "Enter file extensions to include, separated by spaces (e.g., .py .js .html)")
+        self.create_tooltip(self.extensions_entry, "Enter file extensions to include, separated by spaces (e.g., .py .js .html). Leave blank to include all file types.")
 
         # Ignore Patterns
         ttk.Label(main_frame, text="Ignore Patterns:").grid(row=3, column=0, sticky=tk.W, pady=5)
         self.ignore_patterns_entry = ttk.Entry(main_frame, width=50)
         self.ignore_patterns_entry.grid(row=3, column=1, sticky=(tk.W, tk.E), pady=5)
         self.ignore_patterns_entry.insert(0, " ".join(DEFAULT_IGNORE_PATTERNS))
-        self.create_tooltip(self.ignore_patterns_entry, "Enter patterns to ignore, separated by spaces")
+        self.create_tooltip(self.ignore_patterns_entry, "Enter patterns to ignore, separated by spaces. Use glob patterns (e.g., **/node_modules/** to ignore all node_modules folders).")
 
         # Custom Separator
         ttk.Label(main_frame, text="Custom Separator:").grid(row=4, column=0, sticky=tk.W, pady=5)
         self.custom_separator_entry = ttk.Entry(main_frame, width=50)
         self.custom_separator_entry.insert(0, "###")
         self.custom_separator_entry.grid(row=4, column=1, sticky=(tk.W, tk.E), pady=5)
-        self.create_tooltip(self.custom_separator_entry, "Enter a custom separator for file sections (default is ###)")
+        self.create_tooltip(self.custom_separator_entry, "Enter a custom separator for file sections. This will be used to clearly separate different files in the output.")
 
         # Compress Output
         self.compress_var = tk.BooleanVar()
         compress_checkbox = ttk.Checkbutton(main_frame, text="Compress Output", variable=self.compress_var)
         compress_checkbox.grid(row=5, column=0, columnspan=2, sticky=tk.W, pady=5)
-        self.create_tooltip(compress_checkbox, "Check to compress the output file (will add .gz extension)")
+        self.create_tooltip(compress_checkbox, "Check to compress the output file. This will significantly reduce file size but may increase processing time.")
 
         # Buttons
         button_frame = ttk.Frame(main_frame)
@@ -242,17 +248,16 @@ class App(tk.Tk):
         self.download_button.grid(row=0, column=1, padx=5)
         self.watch_button = ttk.Button(button_frame, text="Start Watching", command=self.toggle_watch)
         self.watch_button.grid(row=0, column=2, padx=5)
+        self.cancel_button = ttk.Button(button_frame, text="Cancel", command=self.cancel_operation, state=tk.DISABLED)
+        self.cancel_button.grid(row=0, column=3, padx=5)
 
         # Log Area
         ttk.Label(main_frame, text="Activity Log:").grid(row=7, column=0, sticky=tk.W, pady=5)
-        self.log_area = scrolledtext.ScrolledText(main_frame, wrap=tk.WORD, width=80, height=15)
+        self.log_area = tk.Canvas(main_frame, width=780, height=300, bg='white')
         self.log_area.grid(row=8, column=0, columnspan=3, pady=5)
-        self.log_area.config(state=tk.DISABLED)
-
-        # Set up logging
-        log_handler = TextHandler(self.log_area)
-        logging.getLogger().addHandler(log_handler)
-        logging.getLogger().setLevel(logging.INFO)
+        self.scrollbar = ttk.Scrollbar(main_frame, orient="vertical", command=self.log_area.yview)
+        self.scrollbar.grid(row=8, column=3, sticky='ns')
+        self.log_area.configure(yscrollcommand=self.scrollbar.set)
 
         # Status Bar
         self.status_var = tk.StringVar()
@@ -293,7 +298,7 @@ class App(tk.Tk):
         self.style.configure('TButton', background=bg_color, foreground=fg_color)
         self.style.configure('TCheckbutton', background=bg_color, foreground=fg_color)
         self.style.configure('TEntry', fieldbackground=bg_color, foreground=fg_color)
-        self.log_area.config(bg=bg_color, fg=fg_color)
+        self.log_area.config(bg=bg_color)
         self.status_bar.configure(background=bg_color, foreground=fg_color)
 
     def bind_shortcuts(self):
@@ -304,6 +309,7 @@ class App(tk.Tk):
     def toggle_dark_mode(self):
         self.is_dark_mode = not self.is_dark_mode
         self.configure_styles()
+        self.redraw_log_area()
 
     def create_tooltip(self, widget, text):
         tooltip = ToolTip(widget, text)
@@ -332,28 +338,63 @@ class App(tk.Tk):
             if not messagebox.askyesno("Warning", "No file extensions specified. This may result in processing a large number of files and slow down the operation. Do you want to continue?"):
                 return
 
-        self.log_area.config(state=tk.NORMAL)
-        self.log_area.delete(1.0, tk.END)
-        self.log_area.config(state=tk.DISABLED)
+        self.log_area.delete("all")
+        self.file_items = {}
 
         self.status_var.set("Listing files...")
         self.list_files_button.config(state=tk.DISABLED)
         
         def list_files_thread():
-            file_count = 0
+            y_position = 5
             for file_info in self.manager.list_files():
-                self.log_area.config(state=tk.NORMAL)
-                self.log_area.insert(tk.END, file_info + "\n")
-                self.log_area.see(tk.END)
-                self.log_area.config(state=tk.DISABLED)
-                file_count += 1
+                item = self.log_area.create_text(10, y_position, anchor="w", text=file_info, fill="black" if not self.is_dark_mode else "white", tags="file")
+                delete_icon = self.log_area.create_text(770, y_position, anchor="e", text="🗑️", fill="red", tags=("delete", item))
+                if ": " in file_info:
+                    file_path = file_info.split(": ", 1)[1]
+                else:
+                    file_path = file_info
+                self.log_area.tag_bind(delete_icon, "<Button-1>", lambda e, i=item: self.delete_file(i))
+                self.file_items[file_path] = file_info
+                y_position += 20
+                self.log_area.configure(scrollregion=self.log_area.bbox("all"))
                 self.update_idletasks()
             
-            self.status_var.set(f"File listing complete. {file_count} files found.")
+            self.status_var.set(f"File listing complete. {len(self.file_items)} files found.")
             self.list_files_button.config(state=tk.NORMAL)
             self.download_button.config(state=tk.NORMAL)
 
         threading.Thread(target=list_files_thread, daemon=True).start()
+
+    def delete_file(self, item):
+        try:
+            file_info = self.log_area.itemcget(item, "text")
+            if ": " in file_info:
+                file_path = file_info.split(": ", 1)[1]
+            else:
+                file_path = file_info  # Use the whole text if no colon is found
+
+            if file_path in self.file_items:
+                del self.file_items[file_path]
+                self.manager.files_to_process = [f for f in self.manager.files_to_process if str(f) != file_path]
+                self.log_area.delete(item)
+                self.log_area.delete("delete", item)
+                self.status_var.set(f"File removed. {len(self.file_items)} files remaining.")
+                self.redraw_log_area()
+            else:
+                logging.warning(f"Attempted to delete non-existent file: {file_path}")
+        except Exception as e:
+            logging.error(f"Error in delete_file: {str(e)}")
+            messagebox.showerror("Error", f"An error occurred while deleting the file: {str(e)}")
+
+    def redraw_log_area(self):
+        self.log_area.delete("all")
+        y_position = 5
+        for file_path, file_info in self.file_items.items():
+            new_item = self.log_area.create_text(10, y_position, anchor="w", text=file_info, fill="black" if not self.is_dark_mode else "white", tags="file")
+            delete_icon = self.log_area.create_text(770, y_position, anchor="e", text="🗑️", fill="red", tags=("delete", new_item))
+            self.log_area.tag_bind(delete_icon, "<Button-1>", lambda e, i=new_item: self.delete_file(i))
+            y_position += 20
+        self.log_area.configure(scrollregion=self.log_area.bbox("all"))
 
     def download_to_text(self):
         if not self.validate_inputs():
@@ -373,12 +414,15 @@ class App(tk.Tk):
         try:
             self.status_var.set("Processing files...")
             self.download_button.config(state=tk.DISABLED)
+            self.cancel_button.config(state=tk.NORMAL)
+            self.manager.cancel_flag = False
             self.run_async(self.process_files())
         except Exception as e:
             messagebox.showerror("Error", str(e))
             self.status_var.set("Error occurred")
         finally:
             self.download_button.config(state=tk.NORMAL)
+            self.cancel_button.config(state=tk.DISABLED)
 
     def run_async(self, coroutine):
         def callback():
@@ -388,24 +432,32 @@ class App(tk.Tk):
         self.after(0, callback)
 
     async def process_files(self):
-        self.log_area.config(state=tk.NORMAL)
-        self.log_area.delete(1.0, tk.END)
-        self.log_area.config(state=tk.DISABLED)
+        self.log_area.delete("all")
+        y_position = 5
 
         async for file_info, progress in self.manager.process_folder():
-            self.log_area.config(state=tk.NORMAL)
-            self.log_area.insert(tk.END, file_info + "\n")
-            self.log_area.see(tk.END)
-            self.log_area.config(state=tk.DISABLED)
+            if self.manager.cancel_flag:
+                self.status_var.set("Operation cancelled")
+                return
+
+            self.log_area.create_text(10, y_position, anchor="w", text=file_info, fill="black" if not self.is_dark_mode else "white")
+            y_position += 20
+            self.log_area.configure(scrollregion=self.log_area.bbox("all"))
             self.update_progress(progress)
             await asyncio.sleep(0)  # Allow GUI to update
 
-        messagebox.showinfo("Info", "Download to text completed.")
-        self.status_var.set("Ready")
+        if not self.manager.cancel_flag:
+            messagebox.showinfo("Info", "Download to text completed.")
+            self.status_var.set("Ready")
 
     def update_progress(self, progress):
         self.status_var.set(f"Processing: {progress:.1%} complete")
         self.update_idletasks()
+
+    def cancel_operation(self):
+        self.manager.cancel_flag = True
+        self.cancel_button.config(state=tk.DISABLED)
+        self.status_var.set("Cancelling operation...")
 
     def toggle_watch(self):
         if not self.manager.is_watching:
@@ -427,6 +479,7 @@ class App(tk.Tk):
             self.manager.start_watching()
             self.watch_button.config(text="Stop Watching")
             self.status_var.set("Watching for changes...")
+            self.log_area.create_text(10, self.log_area.winfo_height() - 20, anchor="w", text=f"Watcher started in {self.manager.folder_path}", fill="green")
         else:
             self.manager.stop_watching()
             self.watch_button.config(text="Start Watching")
@@ -463,6 +516,8 @@ Mirrorepo User Guide
 7. List Files: Click to see all files that will be processed.
 8. Download to Text: Click to consolidate files into a single text file.
 9. Start/Stop Watching: Click to begin or end real-time file watching and updating.
+10. Cancel: Click to cancel the current operation.
+11. Delete Files: Click the red trash icon next to a file in the log to remove it from processing.
 
 Keyboard Shortcuts:
 - Ctrl+D: Download to Text
@@ -477,16 +532,15 @@ For more information, please visit our website or contact support.
         about_text = """
 Mirrorepo v1.0
 
-Developed by: Justin Gaffney
-https://github.com/flexfinRTP/
-Copyright © 2024
+Developed by: Your Name/Company
+Copyright © 2023
 
-This application helps you consolidate code repositories into a single text file for easy A.I. review and analysis.
+This application helps you consolidate multiple code files into a single text file for easy review and analysis.
 
 For more information, visit our website:
-https://github.com/flexfinRTP/
+https://www.example.com/mirrorepo
         """
-        messagebox.showinfo("About Code File Manager", about_text)
+        messagebox.showinfo("About Mirrorepo", about_text)
 
 class ToolTip:
     def __init__(self, widget, text):
@@ -512,18 +566,6 @@ class ToolTip:
         if self.tooltip:
             self.tooltip.destroy()
             self.tooltip = None
-
-class TextHandler(logging.Handler):
-    def __init__(self, text_widget):
-        super().__init__()
-        self.text_widget = text_widget
-
-    def emit(self, record):
-        msg = self.format(record)
-        self.text_widget.config(state=tk.NORMAL)
-        self.text_widget.insert(tk.END, msg + '\n')
-        self.text_widget.config(state=tk.DISABLED)
-        self.text_widget.see(tk.END)
 
 def main():
     app = App()
