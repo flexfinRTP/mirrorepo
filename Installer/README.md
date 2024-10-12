@@ -4,6 +4,9 @@
 
 Mirrorepo is a tool designed for efficient code file consolidation with real-time updates and monitoring. Mirrorepo is ideal for developers who need to maintain a consolidated view of their codebase to prepare code for AI-assisted review.
 
+
+![Installer Screenshot](mirrorepo_installer.png)
+
 ## Installation
 
 Click the MirrorepoSetup.exe and follow the instructions.
@@ -15,7 +18,7 @@ To convert code files to a single text file:
 4. Now copy and paste the downloaded text file into your favorite A.I. 
 5. You can also use the Code Watcher to have the text file automatically update when a file changes in your local code repo. Just press 'Start Watching' button.
 
-![Main GUI Screenshot](autocodetext.png)
+![Main GUI Screenshot](../mirrorepo_ui.png)
 
 ## Key Features
 

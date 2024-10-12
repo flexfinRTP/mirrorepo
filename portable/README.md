@@ -15,7 +15,7 @@ To convert code files to a single text file:
 4. Now copy and paste the downloaded text file into your favorite A.I. 
 5. You can also use the Code Watcher to have the text file automatically update when a file changes in your local code repo. Just press 'Start Watching' button.
 
-![Main GUI Screenshot](autocodetext.png)
+![Main GUI Screenshot](../mirrorepo_ui.png)
 
 ## Key Features
 
