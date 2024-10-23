@@ -9,7 +9,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk, scrolledtext
 from pathlib import Path
 from watchdog.observers import Observer
-from watchdog.events import FileSystemEventHandler
+from watchdog.events import FileSystemEventHandler, FileModifiedEvent
 from datetime import datetime
 import difflib
 import threading
@@ -18,6 +18,7 @@ import asyncio
 import aiofiles
 import concurrent.futures
 import chardet
+import re
 
 # Default ignore patterns for common build and configuration folders
 DEFAULT_IGNORE_PATTERNS = [
@@ -29,7 +30,7 @@ DEFAULT_IGNORE_PATTERNS = [
 POPULAR_EXTENSIONS = [
     ".py", ".js", ".ts", ".jsx", ".tsx", ".java", ".c", ".cpp", ".cs", ".go",
     ".rb", ".php", ".swift", ".kt", ".rs", ".scala", ".m", ".h", ".sql", ".sh",
-    ".png", ".jpg", ".jpeg"  # Added image formats
+    ".png", ".jpg", ".jpeg"
 ]
 
 class CodeFileManager:
@@ -43,22 +44,40 @@ class CodeFileManager:
         self.observer = None
         self.is_watching = False
         self.files_to_process = []
+        self.deleted_files = set()
         self.cancel_flag = False
+        self.watch_callback = None
+        self.file_change_queue = asyncio.Queue()
 
     async def read_file(self, file_path):
         try:
             async with aiofiles.open(file_path, 'rb') as file:
                 raw_content = await file.read()
             encoding = chardet.detect(raw_content)['encoding']
-            return raw_content.decode(encoding or 'utf-8')
+            content = raw_content.decode(encoding or 'utf-8')
+            # Minimize file content while preserving readability
+            return self.minimize_content(content)
         except Exception as e:
             logging.error(f"Unable to read file: {file_path}. Error: {str(e)}")
             return f"[Unable to read file: {file_path}]"
 
+    def minimize_content(self, content):
+        # Remove empty lines while preserving essential whitespace
+        lines = content.splitlines()
+        minimized_lines = []
+        for line in lines:
+            stripped = line.rstrip()
+            if stripped:  # Keep non-empty lines
+                # Reduce multiple spaces to single space, except in strings and indentation
+                processed_line = re.sub(r'([^"\']) +', r'\1 ', stripped)
+                minimized_lines.append(processed_line)
+        return '\n'.join(minimized_lines)
+
     async def write_output(self, content):
         try:
             if self.compress:
-                with gzip.open(self.output_file + '.gz', 'wt', encoding='utf-8') as f:
+                # Use highest compression level (9) for maximum compression
+                with gzip.open(self.output_file + '.gz', 'wt', encoding='utf-8', compresslevel=9) as f:
                     f.write(content)
             else:
                 async with aiofiles.open(self.output_file, 'w', encoding='utf-8') as f:
@@ -72,7 +91,9 @@ class CodeFileManager:
         return f"Last modified: {datetime.fromtimestamp(stat.st_mtime)}, Size: {stat.st_size} bytes"
 
     def should_ignore(self, path):
-        return any(fnmatch.fnmatch(str(path), pattern) for pattern in self.ignore_patterns)
+        path_str = str(path)
+        return (any(fnmatch.fnmatch(path_str, pattern) for pattern in self.ignore_patterns) or
+                str(path) in self.deleted_files)
 
     def list_files(self):
         self.files_to_process = []
@@ -89,8 +110,9 @@ class CodeFileManager:
                 if self.extensions and not any(file.endswith(ext) for ext in self.extensions):
                     continue
 
-                self.files_to_process.append(file_path)
-                yield f"Found: {relative_path}"
+                if str(file_path) not in self.deleted_files:
+                    self.files_to_process.append(file_path)
+                    yield f"Found: {relative_path}"
 
     async def process_file(self, file_path):
         relative_path = file_path.relative_to(self.folder_path)
@@ -104,50 +126,94 @@ class CodeFileManager:
         content = []
         total_files = len(self.files_to_process)
         processed_files = 0
-
-        for file_path in self.files_to_process:
-            if self.cancel_flag:
-                break
+        
+        # Process files in parallel for better performance
+        async def process_file_wrapper(file_path):
             try:
                 result = await self.process_file(file_path)
-                content.append(result)
-                processed_files += 1
-                yield f"Processed: {file_path.relative_to(self.folder_path)}", processed_files / total_files
+                return result, None
             except Exception as e:
-                logging.error(f"Error processing file {file_path}: {str(e)}")
-                yield f"Error: {file_path.relative_to(self.folder_path)}", processed_files / total_files
+                return None, (file_path, str(e))
+
+        tasks = [process_file_wrapper(file_path) for file_path in self.files_to_process 
+                if str(file_path) not in self.deleted_files]
+        
+        for future in asyncio.as_completed(tasks):
+            if self.cancel_flag:
+                break
+                
+            result, error = await future
+            processed_files += 1
+            
+            if error:
+                file_path, error_msg = error
+                logging.error(f"Error processing file {file_path}: {error_msg}")
+                yield f"Error: {Path(file_path).relative_to(self.folder_path)}", processed_files / total_files
+            else:
+                content.append(result)
+                yield f"Processed: {self.files_to_process[processed_files-1].relative_to(self.folder_path)}", processed_files / total_files
 
         if not self.cancel_flag:
-            await self.write_output("".join(content))
+            # Join content with minimal separators
+            final_content = "".join(content)
+            await self.write_output(final_content)
             logging.info(f"Code files from {self.folder_path} have been consolidated into {self.output_file}")
 
+    async def handle_file_change(self, event):
+        """Handle file changes in a separate queue to prevent blocking"""
+        await self.file_change_queue.put(event)
+
+    async def process_file_changes(self):
+        """Process file changes from the queue"""
+        while True:
+            try:
+                event = await self.file_change_queue.get()
+                if isinstance(event, FileModifiedEvent):
+                    file_path = Path(event.src_path)
+                    if not self.should_ignore(file_path):
+                        await self.update_output_file(file_path)
+                        if self.watch_callback:
+                            self.watch_callback(f"Updated: {file_path.relative_to(self.folder_path)}")
+            except Exception as e:
+                logging.error(f"Error processing file change: {str(e)}")
+            finally:
+                self.file_change_queue.task_done()
+
     async def update_output_file(self, changed_file):
-        async with aiofiles.open(self.output_file, 'r', encoding='utf-8') as f:
-            content = await f.read()
+        try:
+            async with aiofiles.open(self.output_file, 'r', encoding='utf-8') as f:
+                content = await f.read()
 
-        relative_path = changed_file.relative_to(self.folder_path)
-        new_content = await self.process_file(changed_file)
-        
-        file_header = f"{self.custom_separator} File: {relative_path} {self.custom_separator}\n"
-        start = content.find(file_header)
-        if start != -1:
-            end = content.find(self.custom_separator, start + len(file_header))
-            if end == -1:
-                end = len(content)
-            content = content[:start] + new_content + content[end:]
-        else:
-            content += new_content
+            relative_path = changed_file.relative_to(self.folder_path)
+            new_content = await self.process_file(changed_file)
+            
+            file_header = f"{self.custom_separator} File: {relative_path} {self.custom_separator}\n"
+            start = content.find(file_header)
+            if start != -1:
+                end = content.find(self.custom_separator, start + len(file_header))
+                if end == -1:
+                    end = len(content)
+                content = content[:start] + new_content + content[end:]
+            else:
+                content += new_content
 
-        await self.write_output(content)
-        logging.info(f"Updated {self.output_file} with changes from {relative_path}")
+            await self.write_output(content)
+            logging.info(f"Updated {self.output_file} with changes from {relative_path}")
+        except Exception as e:
+            logging.error(f"Error updating file {changed_file}: {str(e)}")
 
-    def start_watching(self):
+    def start_watching(self, callback=None):
         if not self.is_watching:
+            self.watch_callback = callback
             self.is_watching = True
             self.observer = Observer()
             event_handler = CodeChangeHandler(self)
             self.observer.schedule(event_handler, self.folder_path, recursive=True)
             self.observer.start()
+            
+            # Start the file change processor
+            asyncio.create_task(self.process_file_changes())
+            
             logging.info(f"Started watching for changes in {self.folder_path}")
 
     def stop_watching(self):
@@ -155,6 +221,7 @@ class CodeFileManager:
             self.observer.stop()
             self.observer.join()
             self.is_watching = False
+            self.watch_callback = None
             logging.info("Stopped watching for changes.")
 
 class CodeChangeHandler(FileSystemEventHandler):
@@ -163,14 +230,31 @@ class CodeChangeHandler(FileSystemEventHandler):
 
     def on_modified(self, event):
         if not event.is_directory:
-            file_path = Path(event.src_path)
-            relative_path = file_path.relative_to(self.manager.folder_path)
+            asyncio.create_task(self.manager.handle_file_change(event))
 
-            if self.manager.should_ignore(relative_path):
-                return
+class ScrollableFrame(ttk.Frame):
+    def __init__(self, container, *args, **kwargs):
+        super().__init__(container, *args, **kwargs)
+        self.canvas = tk.Canvas(self)
+        scrollbar = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
+        self.scrollable_frame = ttk.Frame(self.canvas)
 
-            logging.info(f"File changed: {relative_path}")
-            asyncio.run(self.manager.update_output_file(file_path))
+        self.scrollable_frame.bind(
+            "<Configure>",
+            lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        )
+
+        self.canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw")
+        self.canvas.configure(yscrollcommand=scrollbar.set)
+
+        self.canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        # Bind mouse wheel
+        self.canvas.bind_all("<MouseWheel>", self._on_mousewheel)
+
+    def _on_mousewheel(self, event):
+        self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
 
 class App(tk.Tk):
     def __init__(self):
@@ -179,7 +263,7 @@ class App(tk.Tk):
         self.geometry("800x700")
         self.manager = CodeFileManager()
         self.is_dark_mode = False
-        self.log_area = None
+        self.log_frame = None
         self.loop = asyncio.get_event_loop()
         self.create_widgets()
         self.create_menu()
@@ -253,8 +337,11 @@ class App(tk.Tk):
 
         # Log Area
         ttk.Label(main_frame, text="Activity Log:").grid(row=7, column=0, sticky=tk.W, pady=5)
-        self.log_area = tk.Canvas(main_frame, width=780, height=300, bg='white')
-        self.log_area.grid(row=8, column=0, columnspan=3, pady=5)
+        self.log_frame = ScrollableFrame(main_frame)
+        self.log_frame.grid(row=8, column=0, columnspan=3, pady=5, sticky='nsew')
+        self.log_content = ttk.Frame(self.log_frame.scrollable_frame)
+        self.log_content.pack(fill='both', expand=True)
+        
         self.scrollbar = ttk.Scrollbar(main_frame, orient="vertical", command=self.log_area.yview)
         self.scrollbar.grid(row=8, column=3, sticky='ns')
         self.log_area.configure(yscrollcommand=self.scrollbar.set)
@@ -365,36 +452,32 @@ class App(tk.Tk):
 
         threading.Thread(target=list_files_thread, daemon=True).start()
 
-    def delete_file(self, item):
+    def delete_file(self, file_info):
         try:
-            file_info = self.log_area.itemcget(item, "text")
             if ": " in file_info:
                 file_path = file_info.split(": ", 1)[1]
             else:
-                file_path = file_info  # Use the whole text if no colon is found
+                file_path = file_info
 
             if file_path in self.file_items:
                 del self.file_items[file_path]
-                self.manager.files_to_process = [f for f in self.manager.files_to_process if str(f) != file_path]
-                self.log_area.delete(item)
-                self.log_area.delete("delete", item)
-                self.status_var.set(f"File removed. {len(self.file_items)} files remaining.")
+                self.manager.deleted_files.add(file_path)
+                self.manager.files_to_process = [f for f in self.manager.files_to_process 
+                                               if str(f) != file_path]
                 self.redraw_log_area()
-            else:
-                logging.warning(f"Attempted to delete non-existent file: {file_path}")
+                self.status_var.set(f"File removed. {len(self.file_items)} files remaining.")
         except Exception as e:
             logging.error(f"Error in delete_file: {str(e)}")
             messagebox.showerror("Error", f"An error occurred while deleting the file: {str(e)}")
 
     def redraw_log_area(self):
-        self.log_area.delete("all")
-        y_position = 5
+        # Clear existing log entries
+        for widget in self.log_content.winfo_children():
+            widget.destroy()
+
+        # Redraw log entries
         for file_path, file_info in self.file_items.items():
-            new_item = self.log_area.create_text(10, y_position, anchor="w", text=file_info, fill="black" if not self.is_dark_mode else "white", tags="file")
-            delete_icon = self.log_area.create_text(770, y_position, anchor="e", text="🗑️", fill="red", tags=("delete", new_item))
-            self.log_area.tag_bind(delete_icon, "<Button-1>", lambda e, i=new_item: self.delete_file(i))
-            y_position += 20
-        self.log_area.configure(scrollregion=self.log_area.bbox("all"))
+            self.add_log_entry(file_info, None)
 
     def download_to_text(self):
         if not self.validate_inputs():
@@ -568,6 +651,8 @@ class ToolTip:
             self.tooltip = None
 
 def main():
+    logging.basicConfig(level=logging.INFO,
+                       format='%(asctime)s - %(levelname)s - %(message)s')
     app = App()
     app.mainloop()
 
